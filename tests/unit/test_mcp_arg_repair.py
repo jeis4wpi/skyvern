@@ -45,14 +45,15 @@ async def test_raw_arguments_json_string_wrapper_is_unwrapped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_explicit_sibling_arg_wins_over_wrapped_value() -> None:
-    # An explicit top-level arg must never be clobbered by the wrapper.
+async def test_raw_arguments_with_sibling_arg_is_not_unwrapped() -> None:
+    # Only a SOLE raw_arguments is unwrapped. With a real sibling arg present the
+    # call is ambiguous (the blob may be garbage or inject stray keys), so it is
+    # left to error rather than merged — no masking.
     res = await _call(
         "skyvern_block_schema",
         {"block_type": "navigation", "raw_arguments": {"block_type": "extraction"}},
     )
-    assert res.is_error is False
-    assert res.structured_content["data"]["block_type"] == "navigation"
+    assert res.is_error is True
 
 
 @pytest.mark.asyncio
@@ -60,6 +61,13 @@ async def test_non_object_raw_arguments_is_not_masked() -> None:
     # A non-object raw_arguments is a genuinely malformed call; it must still
     # error rather than be silently swallowed.
     res = await _call("skyvern_block_schema", {"raw_arguments": "navigation"})
+    assert res.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_json_array_string_raw_arguments_is_not_masked() -> None:
+    # A JSON-*array* string is not an object payload; it must still error.
+    res = await _call("skyvern_block_schema", {"raw_arguments": '["navigation"]'})
     assert res.is_error is True
 
 
@@ -97,6 +105,28 @@ def test_parameter_keys_non_string_scalar_not_masked() -> None:
     assert args["parameter_keys"] == 5
 
 
+def test_parameter_keys_nested_list_not_masked() -> None:
+    # A list whose elements are not strings must NOT be str()-flattened into
+    # phantom keys — leave the raw value so it still errors at validation.
+    args = {"parameter_keys": '[["a", "b"]]'}
+    repair_tool_arguments("skyvern_code_block_lint", args)
+    assert args["parameter_keys"] == '[["a", "b"]]'
+
+
+def test_parameter_keys_non_string_elements_not_masked() -> None:
+    args = {"parameter_keys": "[1, 2]"}
+    repair_tool_arguments("skyvern_code_block_lint", args)
+    assert args["parameter_keys"] == "[1, 2]"
+
+
+def test_parameter_keys_oversized_string_not_parsed() -> None:
+    # An unbounded attacker-controlled string is left unparsed (DoS guard).
+    huge = "[" + ",".join(["1"] * 40000) + "]"
+    args = {"parameter_keys": huge}
+    repair_tool_arguments("skyvern_code_block_lint", args)
+    assert args["parameter_keys"] == huge
+
+
 # --- mechanism (b): extract schema dict -> json string (SKY-12338) ---
 
 
@@ -111,6 +141,15 @@ def test_extract_schema_string_untouched() -> None:
     args = {"prompt": "x", "schema": '{"type":"object"}'}
     repair_tool_arguments("skyvern_extract", args)
     assert args["schema"] == '{"type":"object"}'
+
+
+def test_extract_schema_list_not_masked() -> None:
+    # A JSON *array* is not a valid schema object; do not serialize it past the
+    # boundary — leave it so pydantic still rejects the non-string value.
+    schema_list = [{"type": "object"}]
+    args = {"prompt": "x", "schema": schema_list}
+    repair_tool_arguments("skyvern_extract", args)
+    assert args["schema"] == schema_list
 
 
 # --- mechanism (b): block_json alias for validate (SKY-11133) ---
